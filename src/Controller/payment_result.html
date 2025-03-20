@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Résultat de la transaction</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f4;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+        }
+        .container {
+            background-color: #fff;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+            text-align: center;
+        }
+        .success {
+            color: green;
+        }
+        .pending {
+            color: orange;
+        }
+        .failed {
+            color: red;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 id="status" class="pending">Transaction en cours...</h1>
+        <p id="transactionId">ID de transaction : Chargement...</p>
+        <p id="amount">Montant : Chargement...</p>
+        <p id="customerName">Nom du client : Chargement...</p>
+    </div>
+
+    <script>
+        const transactionId = new URLSearchParams(window.location.search).get('transactionId');
+        const statusElement = document.getElementById('status');
+        const transactionIdElement = document.getElementById('transactionId');
+        const amountElement = document.getElementById('amount');
+        const customerNameElement = document.getElementById('customerName');
+
+        async function checkTransactionStatus() {
+            try {
+                const response = await fetch(`http://172.20.10.3:7070/api/api/transaction-status?transactionId=${transactionId}`, {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer YOUR_SECRET_API_KEY' // Remplacez par votre clé API secrète
+                    }
+                });
+
+                const data = await response.json();
+
+                if (data.transactionStatus === 'SUCCESS') {
+                    statusElement.textContent = 'Paiement réussi !';
+                    statusElement.className = 'success';
+                } else if (data.transactionStatus === 'FAILED') {
+                    statusElement.textContent = 'Paiement échoué.';
+                    statusElement.className = 'failed';
+                } else {
+                    statusElement.textContent = 'Transaction en cours...';
+                    statusElement.className = 'pending';
+                    setTimeout(checkTransactionStatus, 10000); // Vérifier à nouveau dans 10 secondes
+                }
+
+                transactionIdElement.textContent = `ID de transaction : ${data.transactionId}`;
+                amountElement.textContent = `Montant : ${data.order.cost.total} ${data.order.cost.currency}`;
+                customerNameElement.textContent = `Nom du client : ${data.order.customerFullName}`;
+            } catch (error) {
+                console.error('Erreur lors de la vérification du statut de la transaction :', error);
+                statusElement.textContent = 'Erreur lors de la vérification du statut.';
+                statusElement.className = 'failed';
+            }
+        }
+
+        checkTransactionStatus();
+    </script>
+</body>
+</html>
