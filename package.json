@@ -3,10 +3,11 @@
   "version": "1.0.0",
   "description": "Restaurant Backend ",
   "main": "index.js",
-  "scripts": {
-    "start": "babel-node src/index.js",
-    "dev": "nodemon src/index.js --exec babel-node"
-  },
+"scripts": {
+  "start": "node src/index.js",
+  "dev": "nodemon src/index.js --exec babel-node",
+  "vercel-build": "npm install && echo 'Build complete'"
+},
   "author": "Frave Developer",
   "license": "ISC",
   "dependencies": {
