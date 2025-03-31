@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Résultat du Paiement</title>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #4361ee;
+            --success: #4cc9f0;
+            --danger: #f72585;
+            --gray: #6c757d;
+            --light: #f8f9fa;
+        }
+        body {
+            font-family: 'Poppins', sans-serif;
+            background: #f5f7fa;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+        }
+        .payment-card {
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            width: 100%;
+            max-width: 500px;
+            overflow: hidden;
+        }
+        .payment-header {
+            background: var(--primary);
+            color: white;
+            padding: 20px;
+            text-align: center;
+        }
+        .payment-body {
+            padding: 30px;
+        }
+        .progress-tracker {
+            display: flex;
+            justify-content: space-between;
+            position: relative;
+            margin: 30px 0;
+        }
+        .progress-bar {
+            position: absolute;
+            top: 15px;
+            left: 0;
+            height: 4px;
+            background: var(--primary);
+            z-index: 1;
+            transition: width 0.5s ease;
+        }
+        .step {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            z-index: 2;
+        }
+        .step-icon {
+            width: 34px;
+            height: 34px;
+            border-radius: 50%;
+            background: var(--light);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 8px;
+            color: var(--gray);
+            font-weight: 600;
+        }
+        .step.active .step-icon {
+            background: var(--primary);
+            color: white;
+        }
+        .step.completed .step-icon {
+            background: var(--success);
+            color: white;
+        }
+        .step.failed .step-icon {
+            background: var(--danger);
+            color: white;
+        }
+        .step-label {
+            font-size: 12px;
+            color: var(--gray);
+        }
+        .transaction-info {
+            background: var(--light);
+            border-radius: 10px;
+            padding: 20px;
+            margin-top: 20px;
+        }
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 10px;
+        }
+        .info-label {
+            font-weight: 500;
+            color: var(--gray);
+        }
+        .info-value {
+            font-weight: 600;
+        }
+        .spinner {
+            border: 4px solid rgba(0,0,0,0.1);
+            border-radius: 50%;
+            border-top: 4px solid var(--primary);
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .action-btn {
+            background: var(--primary);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 16px;
+            cursor: pointer;
+            margin-top: 20px;
+            width: 100%;
+            transition: all 0.3s;
+        }
+        .action-btn:hover {
+            opacity: 0.9;
+            transform: translateY(-2px);
+        }
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="payment-card">
+        <div class="payment-header">
+            <h1 id="status-title">Paiement en cours</h1>
+            <p id="status-subtitle">Veuillez patienter pendant la validation</p>
+        </div>
+        
+        <div class="payment-body">
+            <div class="progress-tracker">
+                <div class="progress-bar" id="progress-bar"></div>
+                <div class="step" id="step-submitted">
+                    <div class="step-icon">1</div>
+                    <div class="step-label">Soumis</div>
+                </div>
+                <div class="step" id="step-accepted">
+                    <div class="step-icon">2</div>
+                    <div class="step-label">Accepté</div>
+                </div>
+                <div class="step" id="step-completed">
+                    <div class="step-icon">3</div>
+                    <div class="step-label">Terminé</div>
+                </div>
+            </div>
+
+            <div class="spinner" id="spinner"></div>
+
+            <div class="transaction-info">
+                <div class="info-row">
+                    <span class="info-label">ID Transaction:</span>
+                    <span class="info-value" id="txn-id">...</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Montant:</span>
+                    <span class="info-value" id="txn-amount">...</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Statut:</span>
+                    <span class="info-value" id="txn-status">En cours</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Dernière vérification:</span>
+                    <span class="info-value" id="txn-update">...</span>
+                </div>
+            </div>
+
+            <button id="action-btn" class="action-btn hidden">Retour à l'accueil</button>
+        </div>
+    </div>
+
+    <script>
+        (function() {
+            // Encapsulation dans une IIFE pour éviter les conflits de variables
+            const transactionId = new URLSearchParams(window.location.search).get('transactionId');
+            let checkCount = 0;
+            const maxChecks = 20;
+            const checkInterval = 3000;
+
+            console.log(`Initialisation suivi paiement pour transaction: ${transactionId}`);
+            
+            // Fonctions
+            function updateStatus(status) {
+                const statusText = {
+                    'SUBMITTED': { title: 'Paiement soumis', subtitle: 'En attente de confirmation' },
+                    'ACCEPTED': { title: 'Paiement accepté', subtitle: 'Traitement en cours' },
+                    'COMPLETED': { title: 'Paiement réussi!', subtitle: 'Votre transaction est complète' },
+                    'FAILED': { title: 'Paiement échoué', subtitle: 'Veuillez réessayer' }
+                }[status] || { title: 'En cours', subtitle: '...' };
+                
+                document.getElementById('status-title').textContent = statusText.title;
+                document.getElementById('status-subtitle').textContent = statusText.subtitle;
+                document.getElementById('txn-status').textContent = statusText.title;
+
+                const steps = ['SUBMITTED', 'ACCEPTED', 'COMPLETED'];
+                steps.forEach((step, index) => {
+                    const stepEl = document.getElementById(`step-${step.toLowerCase()}`);
+                    stepEl.classList.remove('active', 'completed', 'failed');
+                    
+                    if (status === 'FAILED' && index === 0) {
+                        stepEl.classList.add('failed');
+                    } else if (steps.indexOf(status) >= index) {
+                        stepEl.classList.add(steps.indexOf(status) > index ? 'completed' : 'active');
+                    }
+                });
+
+                const progress = (steps.indexOf(status) / (steps.length - 1)) * 100;
+                document.getElementById('progress-bar').style.width = `${progress}%`;
+            }
+
+            function updateLastChecked() {
+                document.getElementById('txn-update').textContent = new Date().toLocaleTimeString();
+            }
+
+            function endStatusCheck(finalStatus) {
+                document.getElementById('spinner').classList.add('hidden');
+                const btn = document.getElementById('action-btn');
+                btn.classList.remove('hidden');
+                
+                if (finalStatus === 'FAILED') {
+                    document.querySelector('.payment-header').style.backgroundColor = 'var(--danger)';
+                    btn.textContent = 'Réessayer le paiement';
+                    btn.onclick = () => window.location.href = '/checkout';
+                } else {
+                    btn.onclick = () => window.location.href = '/';
+                }
+            }
+
+            async function checkStatus() {
+                checkCount++;
+                console.log(`Vérification #${checkCount} pour ${transactionId}`);
+                updateLastChecked();
+                
+                try {
+                    const response = await fetch(`/api/transaction-status?transactionId=${transactionId}`);
+                    if (!response.ok) throw new Error('Erreur réseau');
+                    
+                    const { status } = await response.json();
+                    console.log(`Statut reçu pour ${transactionId}:`, status);
+                    updateStatus(status);
+                    
+                    if (status === 'COMPLETED') {
+                        console.log(`Paiement réussi pour ${transactionId}`);
+                        endStatusCheck(status);
+                        setTimeout(() => {
+                            window.location.href = `/payment-success?transactionId=${transactionId}`;
+                        }, 3000);
+                    } else if (status === 'FAILED' || checkCount >= maxChecks) {
+                        console.log(status === 'FAILED' 
+                            ? `Paiement échoué pour ${transactionId}` 
+                            : `Nombre maximal de vérifications atteint pour ${transactionId}`);
+                        endStatusCheck(status);
+                    } else {
+                        setTimeout(checkStatus, checkInterval);
+                    }
+                } catch (error) {
+                    console.error(`Erreur vérification ${transactionId}:`, error);
+                    if (checkCount >= maxChecks) {
+                        endStatusCheck('FAILED');
+                    } else {
+                        setTimeout(checkStatus, checkInterval);
+                    }
+                }
+            }
+
+            // Initialisation
+            document.getElementById('txn-id').textContent = transactionId || 'N/A';
+            updateStatus('SUBMITTED');
+            checkStatus();
+
+            // Gestion hors-ligne
+            window.addEventListener('offline', () => {
+                document.getElementById('status-subtitle').textContent = 'Connexion perdue - Reconnexion...';
+                setTimeout(() => window.location.reload(), 5000);
+            });
+        })();
+    </script>
+</body>
+</html>
