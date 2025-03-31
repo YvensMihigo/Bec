@@ -15,8 +15,9 @@ router.put('/update-status-order-on-way/:idOrder', verifyToken, orders.updateSta
 router.put('/update-status-order-delivered/:idOrder', verifyToken, orders.updateStatusToDelivered);
 router.get('/get-list-orders-for-client', verifyToken, client.getListOrdersForClient);
 
-// Nouvelles routes
-router.get('/payment-result', orders.getPaymentResultPage); // Route pour la page de résultat
-router.get('/api/transaction-status', orders.getTransactionStatus); // Route pour vérifier le statut de la transaction
+// Nouvelles routes de paiement
+router.get('/payment-result', orders.getPaymentResultPage);
+router.get('/api/transaction-status', orders.getTransactionStatus);
+router.post('/pawapay-callback', orders.pawapayCallback);
 
 export default router;

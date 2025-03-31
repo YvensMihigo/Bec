@@ -13,8 +13,6 @@ const pool = mysql.createPool({
     queueLimit: 0
 });
 
-
-
 pool.getConnection((err, connection) => {
 
     if( err ){

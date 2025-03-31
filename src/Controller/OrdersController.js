@@ -1,227 +1,406 @@
 import { response } from 'express';
 import pool from '../Database/mysql';
 import axios from 'axios';
-import fs from 'fs';
 import path from 'path';
+import fs from 'fs';
+import winston from 'winston';
+import crypto from 'crypto';
 
-// Fonction pour ajouter une nouvelle commande
+const OPERATORS = {
+    'AIRTEL MONEY': { pawapay: 'AIRTEL_COD', maishapay: 'AIRTEL' },
+    'ORANGE MONEY': { pawapay: 'ORANGE_COD', maishapay: 'ORANGE' },
+    'M-PESA': { pawapay: 'VODACOM_COD', maishapay: 'MPESA' }
+};
+
+const logger = winston.createLogger({
+    level: 'info',
+    format: winston.format.combine(
+        winston.format.timestamp(),
+        winston.format.json()
+    ),
+    transports: [
+        new winston.transports.File({ 
+            filename: 'logs/payment_errors.log', 
+            level: 'error',
+            format: winston.format.combine(
+                winston.format.timestamp(),
+                winston.format.json()
+            )
+        }),
+        new winston.transports.File({ 
+            filename: 'logs/payment_combined.log',
+            format: winston.format.combine(
+                winston.format.timestamp(),
+                winston.format.json()
+            )
+        }),
+        new winston.transports.Console({
+            format: winston.format.combine(
+                winston.format.colorize(),
+                winston.format.simple(),
+                winston.format.timestamp()
+            )
+        })
+    ]
+});
+
+// Fonction pour formater les logs de transaction
+const transactionLogger = (transactionId, message, data = {}) => {
+    logger.info({
+        transactionId,
+        message,
+        ...data,
+        timestamp: new Date().toISOString()
+    });
+};
+
 export const addNewOrders = async (req, res = response) => {
+    const transactionStart = Date.now();
     try {
         const { uidAddress, total, typePayment, products, instructions, customerPhoneNumber } = req.body;
 
-        console.log('Données reçues :', { uidAddress, total, typePayment, products, instructions });
+        transactionLogger('SYSTEM', 'Début de création de commande', {
+            clientId: req.uid,
+            amount: total,
+            paymentType: typePayment
+        });
 
-        let paymentUrl = null;
-        let transactionId = null;
-
-        // Si le paiement est par Mobile Money, déclencher Maishapay
-        if (typePayment === 'AIRTEL MONEY') {
-            const maishapayResponse = await initiateMaishapayPayment(total, req.uid, customerPhoneNumber);
-        
-            console.log('Réponse de Maishapay :', maishapayResponse); // Log pour vérifier la réponse
-        
-            // Vérifiez si le statut est SUCCESS
-            if (maishapayResponse.status !== 'SUCCESS') {
-                return res.status(400).json({
-                    resp: false,
-                    msg: 'Le paiement a échoué ou est en attente.',
-                });
-            }
-        
-            // Récupérez l'ID de transaction
-            transactionId = maishapayResponse.transactionId;
-
-            // Ajouter la commande à la base de données uniquement si la transaction a réussi
-            const orderdb = await pool.query(
-                'INSERT INTO orders (client_id, address_id, amount, pay_type, special_instructions) VALUES (?,?,?,?,?)',
-                [req.uid, uidAddress, total, typePayment, instructions]
-            );
-
-            console.log('Requête SQL pour orders :', 'INSERT INTO orders (client_id, address_id, amount, pay_type, special_instructions) VALUES (?,?,?,?,?)', [req.uid, uidAddress, total, typePayment, instructions]);
-
-            // Ajouter les détails de la commande
-            products.forEach(o => {
-                pool.query(
-                    'INSERT INTO orderDetails (order_id, product_id, quantity, price) VALUES (?,?,?,?)',
-                    [orderdb.insertId, o.uidProduct, o.quantity, o.quantity * o.price]
-                );
-
-                console.log('Requête SQL pour orderDetails :', 'INSERT INTO orderDetails (order_id, product_id, quantity, price) VALUES (?,?,?,?)', [orderdb.insertId, o.uidProduct, o.quantity, o.quantity * o.price]);
-            });
-
-            // Log pour vérifier la réponse finale du backend
-            console.log('Réponse du backend :', {
-                resp: true,
-                msg: 'New Order added successfully',
-                transactionId: transactionId,
-            });
-
-            res.json({
-                resp: true,
-                msg: 'New Order added successfully',
-                transactionId: transactionId, // Retournez l'ID de transaction
-                paymentUrl: `http://172.20.10.3:7070/api/payment-result?transactionId=${transactionId}`, // URL de la page de résultat
-            });
-        } else {
-            // Si le type de paiement n'est pas Mobile Money, insérez simplement la commande sans vérifier Maishapay
-            const orderdb = await pool.query(
-                'INSERT INTO orders (client_id, address_id, amount, pay_type, special_instructions) VALUES (?,?,?,?,?)',
-                [req.uid, uidAddress, total, typePayment, instructions]
-            );
-
-            console.log('Requête SQL pour orders :', 'INSERT INTO orders (client_id, address_id, amount, pay_type, special_instructions) VALUES (?,?,?,?,?)', [req.uid, uidAddress, total, typePayment, instructions]);
-
-            // Ajouter les détails de la commande
-            products.forEach(o => {
-                pool.query(
-                    'INSERT INTO orderDetails (order_id, product_id, quantity, price) VALUES (?,?,?,?)',
-                    [orderdb.insertId, o.uidProduct, o.quantity, o.quantity * o.price]
-                );
-
-                console.log('Requête SQL pour orderDetails :', 'INSERT INTO orderDetails (order_id, product_id, quantity, price) VALUES (?,?,?,?)', [orderdb.insertId, o.uidProduct, o.quantity, o.quantity * o.price]);
-            });
-
-            res.json({
-                resp: true,
-                msg: 'New Order added successfully',
+        if (!OPERATORS[typePayment]) {
+            transactionLogger('SYSTEM', 'Type de paiement non supporté', { typePayment });
+            return res.status(400).json({ 
+                resp: false, 
+                msg: 'Type de paiement non supporté' 
             });
         }
+
+        const orderResult = await pool.query(
+            `INSERT INTO orders 
+            (client_id, address_id, amount, pay_type, special_instructions, status, is_mobile_payment)
+            VALUES (?, ?, ?, ?, ?, 'PENDING', 1)`,
+            [req.uid, uidAddress, total, typePayment, instructions]
+        );
+
+        const orderId = orderResult.insertId || orderResult[0].insertId;
+        transactionLogger('SYSTEM', 'Commande créée en base', { orderId });
+
+        if (Array.isArray(products)) {
+            for (const product of products) {
+                await pool.query(
+                    'INSERT INTO orderDetails (order_id, product_id, quantity, price) VALUES (?, ?, ?, ?)',
+                    [orderId, product.uidProduct, product.quantity, product.quantity * product.price]
+                );
+            }
+            transactionLogger('SYSTEM', 'Produits ajoutés à la commande', { orderId, productCount: products.length });
+        }
+
+        const paymentResult = process.env.MAISHAPAY_ENABLED === '1'
+            ? await initiateMaishapayPayment(total, customerPhoneNumber, typePayment, req.uid)
+            : await initiatePawapayPayment(total, customerPhoneNumber, typePayment, req.uid);
+
+        transactionLogger(paymentResult.transactionId, 'Paiement initié', {
+            paymentUrl: paymentResult.paymentUrl,
+            status: paymentResult.status,
+            duration: Date.now() - transactionStart
+        });
+
+        res.json({
+            resp: true,
+            msg: 'Commande créée avec succès',
+            transactionId: paymentResult.transactionId,
+            paymentUrl: paymentResult.paymentUrl
+        });
+
     } catch (e) {
-        console.error('Erreur lors de l\'ajout de la commande :', e); // Log pour capturer les erreurs
-        return res.status(500).json({
+        transactionLogger('SYSTEM', 'Erreur création commande', {
+            error: e.message,
+            stack: e.stack,
+            duration: Date.now() - transactionStart
+        });
+        res.status(500).json({
             resp: false,
-            msg: e.toString(),
+            msg: 'Erreur lors de la création de la commande',
+            error: e.message
         });
     }
 };
 
-// Fonction pour initier le paiement Maishapay
-const initiateMaishapayPayment = async (amount, customerId, customerPhoneNumber) => {
-    const transactionReference = Math.floor(Math.random() * 100000000).toString();
+async function initiatePawapayPayment(amount, phone, operator, clientInfo) {
+    const transactionStart = Date.now();
+    const depositId = crypto.randomUUID();
+    const statementDesc = `CL${clientInfo}${depositId.substring(0, 6)}`;
 
-    const maishapayData = {
-        transactionReference: transactionReference,
-        gatewayMode: "0", // 1: Production; 0: Sandbox
-        //publicApiKey: "MP-LIVEPK-ZeQ9AIdLuvM$l7v83TBR$MxQOtf1CMJdE35Si7aA62g$hyoe1x8dOAmeK.uCa5DEgX1l$5YwjSHFXO$rouioWuE8H0FHXdQ2H2TcZFa51P$yeH0209YEuta3", // Live
-        //secretApiKey: "MP-LIVEPK-b1fx2StEu8yQOx8Vm0$juGyv09Yc0Flw$rJpP.$fFH/N0.12Ob0H0xYMnmH$AVSCo7ye9al.6d69mbHiSvS5A2ujjs8aK3ULarqWd0$SXm17w9a$QJ..ij6d", // Live
+    transactionLogger(depositId, 'Initialisation paiement Pawapay', {
+        amount,
+        phone,
+        operator,
+        clientInfo
+    });
 
-        publicApiKey: "MP-SBPK-0/LwuTVZdOAWjoz72ei$q81tiBvgtwP0$yI71U$tuBSUguUje0hs7.KZSjo.yJLd0Zi$kNg4tL0JGbHvOw2Hs2j7nFv$aw1u3cUy7tqOXzs6$e8201rjzyGb", // SB
-        secretApiKey: "MP-SBPK-2sYotlW8ZiyUNnlVklfuOSSkJBxyrkEQ.fbs.$c$p.nc7Ay$1.RmBqb$Sg01qW2UCr0Y3hhoqDh4owutNWf1GcYbjfmEEQ21ZvrBvdF$2.$nB1Ama2GrMCWM", // SB
-
-        order: {
-            amount: amount.toString(),
-            currency: "USD", // ou "USD" selon votre besoin
-            customerFullName: "John Doe", // Remplacez par le nom du client
-            customerEmailAdress: "john.doe@example.com" // Remplacez par l'email du client
+    const payload = {
+        depositId,
+        amount: parseFloat(amount).toFixed(2),
+        currency: "USD",
+        correspondent: OPERATORS[operator].pawapay,
+        payer: {
+            type: "MSISDN",
+            address: { value: phone.replace('+', '') }
         },
-        paymentChannel: {
-            channel: "MOBILEMONEY",
-            provider: "AIRTEL", // ou "ORANGE", "MTN", etc.
-            walletID: "+243972416724", // Remplacez par le numéro du client
-            callbackUrl: "http://172.20.10.3:7070/api/payment-result?transactionId=" + transactionReference // URL de callback
-        }
+        customerTimestamp: new Date().toISOString(),
+        statementDescription: statementDesc,
+        country: "COD",
+        callbackUrl: process.env.PAWAPAY_CALLBACK_URL || `${process.env.BASE_URL}/pawapay-callback`
     };
 
     try {
-        // Initier la transaction
-        const response = await axios.post('https://marchand.maishapay.online/api/collect/v2/store/mobileMoney', maishapayData, {
-            headers: {
+        transactionLogger(depositId, 'Envoi requête à Pawapay', { payload });
+        const response = await axios.post(`${process.env.PAWAPAY_API_URL}/deposits`, payload, {
+            headers: { 
+                'Authorization': `Bearer ${process.env.PAWAPAY_API_KEY}`,
                 'Content-Type': 'application/json'
             }
         });
 
-        console.log('Réponse complète de Maishapay :', response.data);
+        const paymentUrl = response.data?.checkoutUrl 
+            ? response.data.checkoutUrl
+            : `${process.env.BASE_URL}/payment-result?transactionId=${depositId}`;
 
-        // Vérifiez que la réponse contient un statut 200 (SUCCESS) ou 202 (PENDING)
-        if (response.data.status_code === 200 || response.data.status_code === 202) {
-            const transactionId = response.data.transactionId;
+        transactionLogger(depositId, 'Réponse Pawapay reçue', {
+            status: 'SUBMITTED',
+            paymentUrl,
+            responseData: response.data,
+            duration: Date.now() - transactionStart
+        });
 
-            // Attendre que la transaction passe à SUCCESS ou échoue
-            let transactionStatus = response.data.transactionStatus;
-            let attempts = 0;
-            const maxAttempts = 30; // Nombre maximal de tentatives (30 * 10 secondes = 5 minutes)
-            const interval = 10000; // Vérifier toutes les 10 secondes
-
-            while (transactionStatus === 'PENDING' && attempts < maxAttempts) {
-                await new Promise(resolve => setTimeout(resolve, interval)); // Attendre 10 secondes
-                const statusResponse = await axios.get(`https://marchand.maishapay.online/api/collect/v2/transaction/${transactionId}/status`, {
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${maishapayData.secretApiKey}`
-                    }
-                });
-
-                transactionStatus = statusResponse.data.transactionStatus;
-                attempts++;
-                console.log(`Tentative ${attempts}: Statut de la transaction - ${transactionStatus}`);
-            }
-
-            if (transactionStatus === 'SUCCESS') {
-                return {
-                    status: 'SUCCESS',
-                    payment_url: `http://172.20.10.3:7070/api/payment-result?transactionId=${transactionId}`,
-                    transactionId: transactionId
-                };
-            } else {
-                throw new Error(`La transaction est restée en attente ou a échoué. Statut final : ${transactionStatus}`);
-            }
-        } else {
-            throw new Error(`La réponse de Maishapay n'est pas valide. Code: ${response.data.status_code}, Message: ${response.data.message}`);
-        }
+        return {
+            status: 'SUBMITTED',
+            transactionId: depositId,
+            paymentUrl: paymentUrl
+        };
     } catch (error) {
-        console.error('Erreur lors de l\'initiation du paiement Maishapay :', error.response ? error.response.data : error.message);
-        throw error;
+        transactionLogger(depositId, 'Erreur API Pawapay', {
+            error: error.response?.data || error.message,
+            status: 'FAILED',
+            duration: Date.now() - transactionStart
+        });
+        
+        return {
+            status: 'FAILED',
+            transactionId: depositId,
+            paymentUrl: `${process.env.BASE_URL}/payment-result?transactionId=${depositId}`
+        };
+    }
+}
+
+async function initiateMaishapayPayment(amount, phone, operator, clientInfo) {
+    const transactionStart = Date.now();
+    const transactionId = Math.floor(Math.random() * 100000000).toString();
+
+    transactionLogger(transactionId, 'Initialisation paiement Maishapay', {
+        amount,
+        phone,
+        operator,
+        clientInfo
+    });
+
+    const payload = {
+        transactionReference: transactionId,
+        gatewayMode: "1",
+        publicApiKey: process.env.MAISHAPAY_PUBLIC_KEY,
+        secretApiKey: process.env.MAISHAPAY_SECRET_KEY,
+        order: {
+            amount: amount.toString(),
+            currency: "USD",
+            customerFullName: 'Client',
+            customerEmailAdress: 'client@example.com'
+        },
+        paymentChannel: {
+            channel: "MOBILEMONEY",
+            provider: OPERATORS[operator].maishapay,
+            walletID: phone,
+            callbackUrl: `${process.env.BASE_URL}/api/maishapay-callback`
+        }
+    };
+
+    try {
+        transactionLogger(transactionId, 'Envoi requête à Maishapay', { payload });
+        const response = await axios.post(`${process.env.MAISHAPAY_API_URL}/api/collect/v2/store/mobileMoney`, payload);
+        
+        transactionLogger(transactionId, 'Réponse Maishapay reçue', {
+            status: 'SUBMITTED',
+            responseData: response.data,
+            duration: Date.now() - transactionStart
+        });
+
+        return {
+            status: 'SUBMITTED',
+            transactionId: transactionId,
+            paymentUrl: `${process.env.BASE_URL}/payment-result?transactionId=${transactionId}`
+        };
+    } catch (error) {
+        transactionLogger(transactionId, 'Erreur API Maishapay', {
+            error: error.response?.data || error.message,
+            status: 'FAILED',
+            duration: Date.now() - transactionStart
+        });
+        
+        return {
+            status: 'FAILED',
+            transactionId: transactionId,
+            paymentUrl: `${process.env.BASE_URL}/payment-result?transactionId=${transactionId}`
+        };
+    }
+}
+
+export const pawapayCallback = async (req, res) => {
+    const { event, data } = req.body;
+    const transactionId = data?.depositId || 'UNKNOWN';
+
+    try {
+        transactionLogger(transactionId, 'Callback reçu de Pawapay', {
+            event,
+            callbackData: data
+        });
+
+        if (event === 'deposit.success' && data.status === 'COMPLETED') {
+            await pool.query(
+                `UPDATE orders SET 
+                status = 'PAYÉE',
+                transaction_id = ?,
+                payment_date = NOW()
+                WHERE transaction_id = ? OR 
+                (status = 'PENDING' AND amount = ?)`,
+                [data.depositId, data.depositId, data.amount.value]
+            );
+            transactionLogger(transactionId, 'Paiement complété avec succès');
+        } else if (event === 'deposit.failed') {
+            await pool.query(
+                `DELETE FROM orders 
+                WHERE transaction_id = ? OR 
+                (status = 'PENDING' AND amount = ?)`,
+                [data.depositId, data.amount.value]
+            );
+            transactionLogger(transactionId, 'Paiement échoué', { status: data.status });
+        }
+
+        res.status(200).send('OK');
+    } catch (e) {
+        transactionLogger(transactionId, 'Erreur traitement callback Pawapay', {
+            error: e.message,
+            stack: e.stack
+        });
+        res.status(500).send('Error');
     }
 };
 
-// Route pour servir la page de résultat de transaction
+export const getTransactionStatus = async (req, res) => {
+    const { transactionId } = req.query;
+    const checkStart = Date.now();
+
+    try {
+        transactionLogger(transactionId, 'Début vérification statut');
+
+        const [order] = await pool.query(
+            `SELECT status FROM orders WHERE transaction_id = ?`,
+            [transactionId]
+        );
+
+        if (order?.status === 'PAYÉE') {
+            transactionLogger(transactionId, 'Statut trouvé en base de données', {
+                status: 'COMPLETED',
+                duration: Date.now() - checkStart
+            });
+            return res.json({ status: 'COMPLETED' });
+        }
+
+        let status;
+        if (process.env.MAISHAPAY_ENABLED === '1') {
+            transactionLogger(transactionId, 'Vérification statut Maishapay');
+            const response = await axios.get(
+                `${process.env.MAISHAPAY_API_URL}/api/collect/v2/transaction/${transactionId}/status`,
+                { headers: { 'Authorization': `Bearer ${process.env.MAISHAPAY_SECRET_KEY}` } }
+            );
+            status = response.data.transactionStatus === 'SUCCESS' ? 'COMPLETED' : 'PENDING';
+            transactionLogger(transactionId, 'Réponse Maishapay', {
+                apiStatus: response.data.transactionStatus,
+                determinedStatus: status
+            });
+        } else {
+            try {
+                transactionLogger(transactionId, 'Vérification statut Pawapay');
+                const response = await axios.get(
+                    `${process.env.PAWAPAY_API_URL}/deposits/${transactionId}`,
+                    { headers: { 'Authorization': `Bearer ${process.env.PAWAPAY_API_KEY}` } }
+                );
+                status = response.data.status === 'COMPLETED' ? 'COMPLETED' : 'PENDING';
+                transactionLogger(transactionId, 'Réponse Pawapay', {
+                    apiStatus: response.data.status,
+                    determinedStatus: status
+                });
+            } catch (error) {
+                transactionLogger(transactionId, 'Erreur vérification statut Pawapay', {
+                    error: error.message,
+                    fallbackStatus: 'PENDING'
+                });
+                status = 'PENDING';
+            }
+        }
+
+        transactionLogger(transactionId, 'Statut final déterminé', {
+            status,
+            duration: Date.now() - checkStart
+        });
+        res.json({ status });
+
+    } catch (e) {
+        transactionLogger(transactionId, 'Erreur vérification statut', {
+            error: e.message,
+            stack: e.stack,
+            duration: Date.now() - checkStart
+        });
+        res.status(500).json({ error: e.message });
+    }
+};
+
 export const getPaymentResultPage = async (req, res) => {
     try {
-        // Chemin vers le fichier HTML
         const filePath = path.join(__dirname, 'payment_result.html');
-
-        // Lire le fichier HTML
         fs.readFile(filePath, 'utf8', (err, data) => {
             if (err) {
-                console.error('Erreur lors de la lecture du fichier HTML :', err);
-                return res.status(500).send('Erreur interne du serveur');
+                transactionLogger('SYSTEM', 'Erreur lecture fichier HTML', {
+                    error: err.message,
+                    filePath
+                });
+                return res.status(500).send('Erreur interne');
             }
-
-            // Envoyer le fichier HTML comme réponse
             res.send(data);
         });
     } catch (e) {
-        console.error('Erreur lors de la récupération de la page de résultat :', e);
-        res.status(500).send('Erreur interne du serveur');
+        transactionLogger('SYSTEM', 'Erreur page résultat', {
+            error: e.message,
+            stack: e.stack
+        });
+        res.status(500).send('Erreur serveur');
     }
 };
 
-// Route pour vérifier le statut de la transaction
-export const getTransactionStatus = async (req, res) => {
+// ... [Vos autres fonctions existantes restent inchangées] ...
+
+setInterval(async () => {
     try {
-        const { transactionId } = req.query;
-
-        // Vérifiez le statut de la transaction auprès de Maishapay
-        const response = await axios.get(`https://marchand.maishapay.online/api/collect/v2/transaction/${transactionId}/status`, {
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': 'Bearer YOUR_SECRET_API_KEY' // Remplacez par votre clé API secrète
-            }
+        const { affectedRows } = await pool.query(
+            `DELETE FROM orders 
+            WHERE status = 'PENDING' 
+            AND created_at < DATE_SUB(NOW(), INTERVAL 1 DAY)`
+        );
+        transactionLogger('SYSTEM', 'Nettoyage des transactions expirées', {
+            deletedCount: affectedRows
         });
-
-        // Renvoyer le statut de la transaction
-        res.json(response.data);
-    } catch (e) {
-        console.error('Erreur lors de la vérification du statut de la transaction :', e);
-        res.status(500).json({
-            resp: false,
-            msg: e.toString(),
+    } catch (error) {
+        transactionLogger('SYSTEM', 'Erreur nettoyage transactions', {
+            error: error.message
         });
     }
-};
-
-
-
+}, 3600000);
 
 
 
